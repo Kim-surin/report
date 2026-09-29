@@ -2,8 +2,16 @@
 
 ## Project Overview
 
-DB(예: PostgreSQL/MySQL/SQLite)에서 데이터를 조회하여 PPT 보고서 템플릿의 플레이스홀더/표/차트에 데이터를 자동으로 채워 넣는 툴입니다.
+데이터를 조회하여 PPT 보고서 템플릿의 플레이스홀더/표/차트에 데이터를 자동으로 채워 넣는 툴입니다.
 PPT 변환은 필요 없으며, 단순 PPT에 데이터만 채워넣으세요.
+
+데이터: report\데이터
+보고서: report\보고서
+
+예시. 데이터 폴더의 202601 텍스트 파일은 2026년 1월 보고서에 해당하는 데이터입니다.
+보고서 폴더의 202601 파일에 데이터를 채워넣으세요.
+
+대상은 데이터 폴더에 존재하는 전체 텍스트 파일입니다.
 
 ## Code Conventions & Rules
 
@@ -12,7 +20,7 @@ PPT 변환은 필요 없으며, 단순 PPT에 데이터만 채워넣으세요.
 ## Data Mapping Strategy (중요)
 
 - **Table Handling:** PPT 내 표(Table)에 데이터를 채울 때는 셀 단위로 기존 서식을 유지하면서 `text`를 교체하세요.
-- **Error Handling:** DB 조회 실패나 PPT shape를 찾지 못한 경우 프로세스가 멈추지 않고 로그(logging)를 남기도록 작성하세요.
+- **Error Handling:** 데이터 매핑 실패나 PPT shape를 찾지 못한 경우 프로세스가 멈추지 않고 로그(logging)를 남기도록 작성하세요.
 
 ## 예시
 
