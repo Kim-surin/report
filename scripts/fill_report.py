@@ -28,7 +28,6 @@ log = logging.getLogger("fill_report")
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(REPO_ROOT, "데이터")
 REPORT_DIR = os.path.join(REPO_ROOT, "보고서")
-REPORT_NAME_TMPL = "[디와이덕양]분기보고서_{ym}.pptx"
 
 # 데이터 파일 내 각 블록(순서 고정)의 컬럼 정의 - 헤더 행이 없는 경우의 폴백으로 사용
 BLOCK_HEADERS = [
@@ -322,6 +321,22 @@ def fill_report(template_path: str, data: dict, output_path: str) -> None:
     log.info("저장 완료: %s", output_path)
 
 
+def find_report_path(ym: str) -> str | None:
+    """보고서 폴더에서 파일명이 '_{ym}.pptx'로 끝나는 템플릿을 찾는다.
+
+    회사명/보고서 종류(예: [디와이덕양]분기보고서_, [넥센타이어]월간보고서_)는
+    고객사마다 달라질 수 있으므로 접두사에 의존하지 않고 월(YYYYMM) 접미사만으로 매칭한다.
+    """
+    suffix = f"_{ym}.pptx"
+    candidates = [
+        f for f in glob.glob(os.path.join(REPORT_DIR, "*.pptx"))
+        if f.endswith(suffix)
+    ]
+    if len(candidates) > 1:
+        log.warning("'%s'에 해당하는 보고서 템플릿이 여러 개 발견되어 첫 번째 파일을 사용합니다: %s", ym, candidates)
+    return candidates[0] if candidates else None
+
+
 def main() -> None:
     data_files = sorted(glob.glob(os.path.join(DATA_DIR, "*.txt")))
     if not data_files:
@@ -334,9 +349,9 @@ def main() -> None:
             log.warning("파일명이 YYYYMM 형식이 아니어서 건너뜁니다: %s", data_path)
             continue
 
-        report_path = os.path.join(REPORT_DIR, REPORT_NAME_TMPL.format(ym=ym))
-        if not os.path.exists(report_path):
-            log.error("대응하는 보고서 템플릿을 찾지 못했습니다: %s", report_path)
+        report_path = find_report_path(ym)
+        if not report_path:
+            log.error("대응하는 보고서 템플릿을 찾지 못했습니다 (월: %s): %s", ym, REPORT_DIR)
             continue
 
         try:
