@@ -134,12 +134,57 @@ def set_cell_text(cell, text: str) -> None:
         extra_p._p.getparent().remove(extra_p._p)
 
 
-def get_tables(slide):
-    return [s.table for s in slide.shapes if s.has_table]
+def iter_all_tables(prs):
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_table:
+                yield shape.table
 
 
-def get_charts(slide):
-    return [s.chart for s in slide.shapes if s.has_chart]
+def iter_all_charts(prs):
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_chart:
+                yield shape.chart
+
+
+def classify_table(table) -> str | None:
+    """표의 헤더 행 텍스트로 표 종류를 판별한다.
+
+    템플릿마다 슬라이드 구성(개수, FTA 표가 1장/2장으로 나뉘는지 등)이
+    고객사별로 달라질 수 있으므로, 슬라이드 순번이 아니라 표 헤더 내용으로 찾는다.
+    """
+    try:
+        header = [c.text.strip() for c in table.rows[0].cells]
+    except Exception:
+        return None
+    if header == ["구분", "판정 건수", "비율 (%)"]:
+        return "summary"
+    if header and "FTA" in header[0]:
+        return "fta"
+    if header and header[0] == "협력사명":
+        if len(header) == 8:
+            return "vendor"
+        if len(header) == 6:
+            return "material"
+    return None
+
+
+def find_chart(charts, title_candidates: tuple[str, ...], category_candidates: tuple[str, ...]):
+    for chart in charts:
+        try:
+            if chart.has_title and chart.chart_title.text_frame.text.strip() in title_candidates:
+                return chart
+        except Exception:
+            pass
+    for chart in charts:
+        try:
+            cats = set(chart.plots[0].categories)
+        except Exception:
+            continue
+        if cats == set(category_candidates):
+            return chart
+    return None
 
 
 def ensure_data_rows(table, needed: int) -> None:
@@ -176,13 +221,19 @@ def map_error_categories(errors: list[dict]) -> dict[str, float]:
 
 def fill_report(template_path: str, data: dict, output_path: str) -> None:
     prs = Presentation(template_path)
-    slides = list(prs.slides)
 
-    # ---- Slide 3: 원산지 판정 및 비역내산 판정 상세 ----
+    all_tables = list(iter_all_tables(prs))
+    all_charts = list(iter_all_charts(prs))
+    summary_tables = [t for t in all_tables if classify_table(t) == "summary"]
+    fta_tables = [t for t in all_tables if classify_table(t) == "fta"]
+    vendor_tables = [t for t in all_tables if classify_table(t) == "vendor"]
+    material_tables = [t for t in all_tables if classify_table(t) == "material"]
+
+    # ---- 원산지 판정 및 비역내산 판정 상세 (표 2개 + 도넛 차트 2개) ----
     try:
-        slide3 = slides[2]
-        tables3 = get_tables(slide3)
-        table1, table2 = tables3[0], tables3[1]
+        if len(summary_tables) < 2:
+            raise ValueError(f"'구분/판정 건수/비율 (%)' 표를 2개 찾지 못했습니다 (발견: {len(summary_tables)}개)")
+        table1, table2 = summary_tables[0], summary_tables[1]
         s = data["summary"]
 
         table1_rows = [
@@ -209,8 +260,10 @@ def fill_report(template_path: str, data: dict, output_path: str) -> None:
             set_cell_text(row.cells[1], cnt)
             set_cell_text(row.cells[2], ratio)
 
-        charts3 = get_charts(slide3)
-        chart1, chart2 = charts3[0], charts3[1]
+        chart1 = find_chart(all_charts, ("FTA 원산지 판정 현황",), ("역내산율", "역외산율", "판정실패"))
+        chart2 = find_chart(all_charts, ("비역내산 판정 상세",), ("세번변경기준", "부가가치기준", "조합기준"))
+        if chart1 is None or chart2 is None:
+            raise ValueError("원산지 판정 현황/비역내산 판정 상세 도넛 차트를 찾지 못했습니다")
 
         cd1 = CategoryChartData()
         cd1.categories = ["역내산율", "역외산율", "판정실패"]
@@ -230,62 +283,57 @@ def fill_report(template_path: str, data: dict, output_path: str) -> None:
         ))
         chart2.replace_data(cd2)
     except Exception:
-        log.exception("슬라이드 3(원산지 판정 및 비역내산 판정 상세) 처리 중 오류 발생: %s", template_path)
+        log.exception("원산지 판정 및 비역내산 판정 상세 처리 중 오류 발생: %s", template_path)
 
-    # ---- Slide 4: 원산지 판정 에러 현황 ----
+    # ---- 원산지 판정 에러 현황 (막대 차트) ----
     try:
-        slide4 = slides[3]
-        charts4 = get_charts(slide4)
-        chart3 = charts4[0]
+        chart3 = find_chart(all_charts, ("원산지 판정 에러 현황",), tuple(ERROR_CATEGORIES))
+        if chart3 is None:
+            raise ValueError("원산지 판정 에러 현황 차트를 찾지 못했습니다")
         totals = map_error_categories(data["errors"])
         cd3 = CategoryChartData()
         cd3.categories = ERROR_CATEGORIES
         cd3.add_series("특혜", tuple(totals[c] for c in ERROR_CATEGORIES))
         chart3.replace_data(cd3)
     except Exception:
-        log.exception("슬라이드 4(원산지 판정 에러 현황) 처리 중 오류 발생: %s", template_path)
+        log.exception("원산지 판정 에러 현황 처리 중 오류 발생: %s", template_path)
 
-    # ---- Slide 5 & 6: 협정별 원산지 판정 현황 ----
+    # ---- 협정별 원산지 판정 현황 (FTA 표 - 1장 또는 여러 장에 걸쳐 있을 수 있음) ----
     try:
-        slide5 = slides[4]
-        slide6 = slides[5]
-        table5 = get_tables(slide5)[0]
-        table6_raw = get_tables(slide6)[0]
-
+        if not fta_tables:
+            raise ValueError("FTA 협정 표를 찾지 못했습니다")
         fta_rows = data["fta"]
-        slide5_capacity = len(table5.rows) - 1
-        first_part = fta_rows[:slide5_capacity]
-        remaining_part = fta_rows[slide5_capacity:]
+        remaining = list(fta_rows)
+        for idx, table in enumerate(fta_tables):
+            is_last = idx == len(fta_tables) - 1
+            capacity = len(table.rows) - 1
+            take = len(remaining) if is_last else min(capacity, len(remaining))
+            part, remaining = remaining[:take], remaining[take:]
 
-        for i, row in enumerate(first_part, start=1):
-            trow = table5.rows[i]
-            set_cell_text(trow.cells[0], row["FTA_NAME"])
-            set_cell_text(trow.cells[1], row["PRODUCT_COUNT"])
-            set_cell_text(trow.cells[2], row["COO_Y_COUNT"])
-            set_cell_text(trow.cells[3], row["COO_N_COUNT"])
-            set_cell_text(trow.cells[4], row["COO_ERR_COUNT"])
-            set_cell_text(trow.cells[5], row["COO_Y_RATIO"])
-
-        ensure_data_rows(table6_raw, len(remaining_part))
-        table6 = get_tables(slide6)[0]
-        for i, row in enumerate(remaining_part, start=1):
-            trow = table6.rows[i]
-            set_cell_text(trow.cells[0], row["FTA_NAME"])
-            set_cell_text(trow.cells[1], row["PRODUCT_COUNT"])
-            set_cell_text(trow.cells[2], row["COO_Y_COUNT"])
-            set_cell_text(trow.cells[3], row["COO_N_COUNT"])
-            set_cell_text(trow.cells[4], row["COO_ERR_COUNT"])
-            set_cell_text(trow.cells[5], row["COO_Y_RATIO"])
+            ensure_data_rows(table, len(part))
+            # ensure_data_rows()가 표 내부 행을 복제/삭제하므로, 같은 위치의 FTA 표를 다시 조회해서 채운다.
+            refreshed = [t for t in iter_all_tables(prs) if classify_table(t) == "fta"][idx]
+            for i, row in enumerate(part, start=1):
+                trow = refreshed.rows[i]
+                set_cell_text(trow.cells[0], row["FTA_NAME"])
+                set_cell_text(trow.cells[1], row["PRODUCT_COUNT"])
+                set_cell_text(trow.cells[2], row["COO_Y_COUNT"])
+                set_cell_text(trow.cells[3], row["COO_N_COUNT"])
+                set_cell_text(trow.cells[4], row["COO_ERR_COUNT"])
+                set_cell_text(trow.cells[5], row["COO_Y_RATIO"])
+        if remaining:
+            log.warning("FTA 표 공간이 부족해 %d개 협정을 채우지 못했습니다: %s", len(remaining), template_path)
     except Exception:
-        log.exception("슬라이드 5/6(협정별 원산지 판정 현황) 처리 중 오류 발생: %s", template_path)
+        log.exception("협정별 원산지 판정 현황 처리 중 오류 발생: %s", template_path)
 
-    # ---- Slide 7: 협력사별 원산지확인서 수취 현황 ----
+    # ---- 협력사별 원산지확인서 수취 현황 ----
     try:
-        slide7 = slides[6]
-        table7_raw = get_tables(slide7)[0]
+        if not vendor_tables:
+            raise ValueError("협력사별 원산지확인서 수취 현황 표를 찾지 못했습니다")
+        table7 = vendor_tables[0]
         vendors = data["vendors"]
-        ensure_data_rows(table7_raw, len(vendors))
-        table7 = get_tables(slide7)[0]
+        ensure_data_rows(table7, len(vendors))
+        table7 = [t for t in iter_all_tables(prs) if classify_table(t) == "vendor"][0]
         for i, row in enumerate(vendors, start=1):
             trow = table7.rows[i]
             set_cell_text(trow.cells[0], row["VENDOR_NAME"])
@@ -297,15 +345,16 @@ def fill_report(template_path: str, data: dict, output_path: str) -> None:
             set_cell_text(trow.cells[6], row["COO_RATIO"])
             set_cell_text(trow.cells[7], row["PO_AMOUNT"])
     except Exception:
-        log.exception("슬라이드 7(협력사별 원산지확인서 수취 현황) 처리 중 오류 발생: %s", template_path)
+        log.exception("협력사별 원산지확인서 수취 현황 처리 중 오류 발생: %s", template_path)
 
-    # ---- Slide 8: 협력사별 원산지확인서 수취/미수취 자재 내역 ----
+    # ---- 협력사별 원산지확인서 수취/미수취 자재 내역 ----
     try:
-        slide8 = slides[7]
-        table8_raw = get_tables(slide8)[0]
+        if not material_tables:
+            raise ValueError("협력사별 원산지확인서 수취/미수취 자재 내역 표를 찾지 못했습니다")
+        table8 = material_tables[0]
         materials = data["materials"]
-        ensure_data_rows(table8_raw, len(materials))
-        table8 = get_tables(slide8)[0]
+        ensure_data_rows(table8, len(materials))
+        table8 = [t for t in iter_all_tables(prs) if classify_table(t) == "material"][0]
         for i, row in enumerate(materials, start=1):
             trow = table8.rows[i]
             set_cell_text(trow.cells[0], row["VENDOR_NAME"])
@@ -315,7 +364,7 @@ def fill_report(template_path: str, data: dict, output_path: str) -> None:
             set_cell_text(trow.cells[4], row["PO_AMOUNT"])
             set_cell_text(trow.cells[5], row["COO_N"])
     except Exception:
-        log.exception("슬라이드 8(협력사별 원산지확인서 수취/미수취 자재 내역) 처리 중 오류 발생: %s", template_path)
+        log.exception("협력사별 원산지확인서 수취/미수취 자재 내역 처리 중 오류 발생: %s", template_path)
 
     prs.save(output_path)
     log.info("저장 완료: %s", output_path)
